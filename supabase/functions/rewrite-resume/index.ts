@@ -125,6 +125,20 @@ const tool = {
   },
 };
 
+// Strip OpenAI-specific keywords ("additionalProperties") so the schema is valid for Gemini.
+function cleanSchema(s: any): any {
+  if (Array.isArray(s)) return s.map(cleanSchema);
+  if (s && typeof s === "object") {
+    const out: any = {};
+    for (const [k, v] of Object.entries(s)) {
+      if (k === "additionalProperties") continue;
+      out[k] = cleanSchema(v);
+    }
+    return out;
+  }
+  return s;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -137,59 +151,64 @@ Deno.serve(async (req) => {
       });
     }
 
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY missing");
+    const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
+    if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
 
-    const userMsg = `JOB DESCRIPTION:\n"""\n${jobDescription}\n"""\n\nORIGINAL RESUME (raw text from PDF):\n"""\n${resumeText}\n"""\n\nRewrite this resume to maximize ATS match for the JD. Mirror the JD's exact keywords. Apply the XYZ formula to every bullet. Then call the emit_resume tool.`;
+    const userMsg = `JOB DESCRIPTION:\n"""\n${jobDescription}\n"""\n\nORIGINAL RESUME (raw text from PDF):\n"""\n${resumeText}\n"""\n\nRewrite this resume to maximize ATS match for the JD. Mirror the JD's exact keywords. Apply the XYZ formula to every bullet. Then call the emit_resume function.`;
 
-    const aiRes = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    // Google AI Studio: free tier on gemini-2.0-flash / gemini-1.5-flash
+    const MODEL = "gemini-2.0-flash";
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+    const aiRes = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userMsg },
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents: [{ role: "user", parts: [{ text: userMsg }] }],
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                name: tool.function.name,
+                description: tool.function.description,
+                parameters: cleanSchema(tool.function.parameters),
+              },
+            ],
+          },
         ],
-        tools: [tool],
-        tool_choice: { type: "function", function: { name: "emit_resume" } },
+        toolConfig: {
+          functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["emit_resume"] },
+        },
       }),
     });
 
     if (!aiRes.ok) {
+      const errText = await aiRes.text();
+      console.error("Gemini error", aiRes.status, errText);
       if (aiRes.status === 429) {
-        return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again shortly." }), {
+        return new Response(JSON.stringify({ error: "Gemini free-tier rate limit hit. Wait a minute and retry." }), {
           status: 429,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      if (aiRes.status === 402) {
-        return new Response(JSON.stringify({ error: "AI credits exhausted. Add funds in Settings → Workspace → Usage." }), {
-          status: 402,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      const errText = await aiRes.text();
-      console.error("AI gateway error", aiRes.status, errText);
-      return new Response(JSON.stringify({ error: "AI gateway error" }), {
+      return new Response(JSON.stringify({ error: `Gemini error: ${errText.slice(0, 300)}` }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const data = await aiRes.json();
-    const call = data?.choices?.[0]?.message?.tool_calls?.[0];
-    if (!call?.function?.arguments) {
-      console.error("No tool call in response", JSON.stringify(data).slice(0, 1000));
+    const parts = data?.candidates?.[0]?.content?.parts ?? [];
+    const fnCall = parts.find((p: any) => p.functionCall)?.functionCall;
+    if (!fnCall?.args) {
+      console.error("No functionCall in response", JSON.stringify(data).slice(0, 1500));
       return new Response(JSON.stringify({ error: "AI did not return structured resume" }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    const resume = JSON.parse(call.function.arguments);
+    const resume = fnCall.args;
 
     return new Response(JSON.stringify({ resume }), {
       status: 200,

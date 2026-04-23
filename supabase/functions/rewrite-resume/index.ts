@@ -203,7 +203,13 @@ Deno.serve(async (req) => {
       console.log(`${model} exhausted retries, falling back...`);
     }
 
-    if (!aiRes.ok) {
+    if (!aiRes || !aiRes.ok) {
+      if (!aiRes) {
+        return new Response(JSON.stringify({ error: "Gemini call failed to initialize" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
       const errText = await aiRes.text();
       console.error("Gemini error", aiRes.status, errText);
       if (aiRes.status === 429) {

@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
+import { rewriteResumeWithGemini } from "@/lib/gemini";
 import { extractPdfText } from "@/lib/pdf-extract";
 import {
   hybridScore,
@@ -73,13 +73,7 @@ export default function Index() {
     setPhase("rewriting");
     setResume(null);
     try {
-      const { data, error } = await supabase.functions.invoke("rewrite-resume", {
-        body: { resumeText, jobDescription: jd },
-      });
-      if (error) throw error;
-      if ((data as any)?.error) throw new Error((data as any).error);
-      const r = (data as any)?.resume as RewrittenResume;
-      if (!r) throw new Error("Empty response");
+      const r = await rewriteResumeWithGemini(resumeText, jd);
       setResume(r);
       setPhase("done");
       toast.success("Resume re-engineered.");
@@ -87,7 +81,6 @@ export default function Index() {
       console.error(e);
       const msg = e?.message ?? "Rewrite failed";
       if (msg.toLowerCase().includes("rate")) toast.error("Rate limited. Try again in a moment.");
-      else if (msg.toLowerCase().includes("credit") || msg.includes("402")) toast.error("AI credits exhausted. Add funds in Workspace settings.");
       else toast.error(msg);
       setPhase("idle");
     }

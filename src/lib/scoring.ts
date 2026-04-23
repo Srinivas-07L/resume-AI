@@ -144,6 +144,10 @@ export function resumeToPlainText(r: RewrittenResume): string {
 }
 
 export function hybridScore(aiScore: number, overlapScore: number): number {
-  // Average, weighted slightly toward overlap (deterministic)
-  return Math.round(aiScore * 0.45 + overlapScore * 0.55);
+  // Weight deterministic overlap heavily — it's what real ATS systems do.
+  // Floor by overlap so a strong keyword match can't be dragged down by a
+  // pessimistic AI self-score.
+  const blended = Math.round(aiScore * 0.25 + overlapScore * 0.75);
+  return Math.max(blended, overlapScore - 2);
 }
+

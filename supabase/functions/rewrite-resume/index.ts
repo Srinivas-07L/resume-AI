@@ -157,45 +157,59 @@ Deno.serve(async (req) => {
     const userMsg = `JOB DESCRIPTION:\n"""\n${jobDescription}\n"""\n\nORIGINAL RESUME (raw text from PDF):\n"""\n${resumeText}\n"""\n\nRewrite this resume to maximize ATS match for the JD. Mirror the JD's exact keywords. Apply the XYZ formula to every bullet. Then call the emit_resume function.`;
 
     // Google AI Studio: free tier on gemini-2.0-flash / gemini-1.5-flash
-    const MODEL = "gemini-flash-latest";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    // Try the stronger model first; fall back to the lighter one if it stays rate-limited.
+    const MODELS = ["gemini-2.0-flash", "gemini-flash-latest"];
+    const delays = [2000, 5000, 12000, 25000]; // up to 5 attempts per model
 
-    const callGemini = () => fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: "user", parts: [{ text: userMsg }] }],
-        tools: [
-          {
-            functionDeclarations: [
-              {
-                name: tool.function.name,
-                description: tool.function.description,
-                parameters: cleanSchema(tool.function.parameters),
-              },
-            ],
+    const callGemini = (model: string) => fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          contents: [{ role: "user", parts: [{ text: userMsg }] }],
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: tool.function.name,
+                  description: tool.function.description,
+                  parameters: cleanSchema(tool.function.parameters),
+                },
+              ],
+            },
+          ],
+          toolConfig: {
+            functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["emit_resume"] },
           },
-        ],
-        toolConfig: {
-          functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["emit_resume"] },
-        },
-      }),
-    });
+        }),
+      },
+    );
 
-    // Exponential backoff: 2s, 5s, 12s, 25s (max 5 attempts)
-    const delays = [2000, 5000, 12000, 25000];
-    let aiRes = await callGemini();
-    let attempt = 0;
-    while (aiRes.status === 429 && attempt < delays.length) {
-      await aiRes.text(); // drain body to free connection
-      console.log(`Gemini 429 — retry ${attempt + 1}/${delays.length} in ${delays[attempt]}ms`);
-      await new Promise((r) => setTimeout(r, delays[attempt]));
-      attempt++;
-      aiRes = await callGemini();
+    let aiRes: Response | null = null;
+    for (const model of MODELS) {
+      console.log(`Trying model: ${model}`);
+      aiRes = await callGemini(model);
+      let attempt = 0;
+      while (aiRes.status === 429 && attempt < delays.length) {
+        await aiRes.text();
+        console.log(`429 on ${model} — retry ${attempt + 1}/${delays.length} in ${delays[attempt]}ms`);
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+        attempt++;
+        aiRes = await callGemini(model);
+      }
+      if (aiRes.status !== 429) break; // success or non-429 error: stop trying models
+      console.log(`${model} exhausted retries, falling back...`);
     }
 
-    if (!aiRes.ok) {
+    if (!aiRes || !aiRes.ok) {
+      if (!aiRes) {
+        return new Response(JSON.stringify({ error: "Gemini call failed to initialize" }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
       const errText = await aiRes.text();
       console.error("Gemini error", aiRes.status, errText);
       if (aiRes.status === 429) {

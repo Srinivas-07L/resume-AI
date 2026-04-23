@@ -132,7 +132,7 @@ export default function Index() {
             Universal Resume Re-engineer
           </h1>
           <p className="mt-3 text-muted-foreground text-lg">
-            Convert any resume into a <strong className="text-foreground">95%+ ATS-compliant PDF</strong> tailored to any job description — VLSI, Full Stack, Mechanical, Finance, anything.
+            Convert any resume into an <strong className="text-foreground">85%+ ATS-compliant PDF</strong> tailored to any job description — VLSI, Full Stack, Mechanical, Finance, anything.
           </p>
         </section>
 

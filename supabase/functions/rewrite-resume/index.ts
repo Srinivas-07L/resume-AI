@@ -157,7 +157,7 @@ Deno.serve(async (req) => {
     const userMsg = `JOB DESCRIPTION:\n"""\n${jobDescription}\n"""\n\nORIGINAL RESUME (raw text from PDF):\n"""\n${resumeText}\n"""\n\nRewrite this resume to maximize ATS match for the JD. Mirror the JD's exact keywords. Apply the XYZ formula to every bullet. Then call the emit_resume function.`;
 
     // Google AI Studio: free tier on gemini-2.0-flash / gemini-1.5-flash
-    const MODEL = "gemini-1.5-flash";
+    const MODEL = "gemini-flash-latest";
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
     const callGemini = () => fetch(url, {
@@ -183,10 +183,15 @@ Deno.serve(async (req) => {
       }),
     });
 
+    // Exponential backoff: 2s, 5s, 12s, 25s (max 5 attempts)
+    const delays = [2000, 5000, 12000, 25000];
     let aiRes = await callGemini();
-    if (aiRes.status === 429) {
-      await aiRes.text(); // drain
-      await new Promise((r) => setTimeout(r, 4000));
+    let attempt = 0;
+    while (aiRes.status === 429 && attempt < delays.length) {
+      await aiRes.text(); // drain body to free connection
+      console.log(`Gemini 429 — retry ${attempt + 1}/${delays.length} in ${delays[attempt]}ms`);
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+      attempt++;
       aiRes = await callGemini();
     }
 

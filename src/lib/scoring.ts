@@ -90,23 +90,36 @@ export function keywordOverlapScore(resumeText: string, jd: string): {
   matched: string[];
   missing: string[];
 } {
-  const jdPhrases = extractKeyPhrases(jd);
-  const resumeLower = " " + resumeText.toLowerCase().replace(/\s+/g, " ") + " ";
+  const jdPhrases = [...extractKeyPhrases(jd)].filter((p) => p.length >= 3);
+  // Normalize resume: collapse all non-alphanumerics to single spaces so
+  // word boundaries are detectable regardless of punctuation/newlines.
+  const norm = (s: string) =>
+    " " + s.toLowerCase().replace(/[^a-z0-9+#./\-]+/g, " ").replace(/\s+/g, " ") + " ";
+  const resumeNorm = norm(resumeText);
+
+  const isMatch = (p: string) => resumeNorm.includes(" " + p + " ");
+
+  // Weight phrases: trigrams=3, bigrams=2, unigrams=1.
+  const weightOf = (p: string) => p.split(" ").length;
+
+  // Prefer specific multi-word phrases; cap to keep scoring focused.
+  const sorted = jdPhrases.sort((a, b) => weightOf(b) - weightOf(a) || b.length - a.length).slice(0, 150);
+
+  let matchedWeight = 0;
+  let totalWeight = 0;
   const matched: string[] = [];
   const missing: string[] = [];
-  // Focus on multi-word phrases + meaningful unigrams
-  const candidates = [...jdPhrases].filter((p) => p.length >= 3);
-  // Cap to top phrases by length to favor specific ones
-  const sorted = candidates.sort((a, b) => b.length - a.length).slice(0, 120);
   for (const p of sorted) {
-    if (resumeLower.includes(" " + p + " ") || resumeLower.includes(" " + p + ".") || resumeLower.includes(" " + p + ",")) {
+    const w = weightOf(p);
+    totalWeight += w;
+    if (isMatch(p)) {
+      matchedWeight += w;
       matched.push(p);
     } else {
       missing.push(p);
     }
   }
-  const total = matched.length + missing.length;
-  const score = total === 0 ? 0 : Math.round((matched.length / total) * 100);
+  const score = totalWeight === 0 ? 0 : Math.round((matchedWeight / totalWeight) * 100);
   return { score, matched, missing };
 }
 

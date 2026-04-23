@@ -4,11 +4,19 @@ const SYSTEM_PROMPT = `You are a world-class Technical Resume Strategist. Your m
 
 STRICT CONTENT RULES:
 1. HARD SKILLS ONLY: The 'skills' section MUST contain only technical tools, languages, frameworks, or specific hard methodologies (e.g., "PostgreSQL", "React", "Unit Testing").
-2. NO SOFT SKILLS IN SKILLS: Never include soft skills like "collaboration", "communication", "leadership", or "problem-solving" in the skills list. These belong in the Experience bullets where they can be proven with actions.
+2. NO SOFT SKILLS IN SKILLS: Never include soft skills like "collaboration", "communication", "leadership", or "problem-solving" in the skills list. These belong in the Experience bullets.
 3. NO VERBS/SENTENCES IN SKILLS: Each item in the skills array must be a noun or a short noun phrase (max 3 words). Never include phrases like "Collaborate with teams" or "Ensure quality".
 4. NO VERBATIM COPYING: Never copy distinctive phrases or full sentences from the JD. You must REPHRASE the JD requirements to match the candidate's actual work history.
 5. GOOGLE XYZ FORMULA: Every bullet in the 'experience' and 'projects' sections must follow: "Accomplished [X] as measured by [Y], by doing [Z]."
-6. AUTHENTICITY: Do not invent facts. If the candidate hasn't done something, don't say they have. Instead, highlight their most relevant transferable skill.
+6. AUTHENTICITY: Do not invent facts.
+
+EXAMPLES OF WHAT TO DO vs WHAT NOT TO DO:
+
+BAD SKILLS LIST (DO NOT DO THIS):
+["Collaborate with development teams to ensure quality", "Understand project requirements and industry standards", "Perform database testing and manual testing", "7. continuously improve results"]
+
+GOOD SKILLS LIST (DO THIS):
+["Manual Testing", "PostgreSQL", "Postman", "Java", "Python", "Regression Testing", "JIRA", "API Testing"]
 
 Your goal is a resume that passes ATS because it uses the right technical keywords, but wins the interview because it reads like a real, high-achieving professional wrote it.`;
 
@@ -153,5 +161,22 @@ export async function rewriteResumeWithGemini(resumeText: string, jobDescription
     throw new Error("AI did not return a structured resume. Please try again.");
   }
 
-  return fnCall.args as RewrittenResume;
+  const resume = fnCall.args as RewrittenResume;
+
+  // ===== POST-PROCESSING FILTER (HARD ENFORCEMENT) =====
+  // If the AI still tries to dump sentences into the skills, we clean it up here.
+  if (resume.skills && Array.isArray(resume.skills)) {
+    resume.skills = resume.skills
+      .map(s => s.trim())
+      // Remove anything that looks like a sentence (more than 4 words)
+      .filter(s => s.split(/\s+/).length <= 4)
+      // Remove anything that contains numbers followed by a dot (e.g. "1. collaborate")
+      .filter(s => !/^\d+\./.test(s))
+      // Remove common soft skill/verb starters
+      .filter(s => !/^(collaborate|ensure|understand|perform|deliver|using|working|strong|excellent|responsible)/i.test(s))
+      // Take only the top 20
+      .slice(0, 20);
+  }
+
+  return resume;
 }

@@ -121,32 +121,38 @@ const tool = {
 const MODELS = [
   "gemini-2.0-flash",
   "gemini-1.5-flash",
+  "gemini-1.5-flash-latest",
   "gemini-1.5-flash-8b",
+  "gemini-1.5-pro",
 ];
 
 async function fetchWithRetry(
   url: string,
   options: RequestInit,
-  maxRetries = 2,
-  initialDelay = 1000
+  maxRetries = 3,
+  initialDelay = 1500
 ): Promise<Response> {
-  let lastError: any;
+  let lastResponse: Response | null = null;
   
   for (let i = 0; i <= maxRetries; i++) {
     try {
       const response = await fetch(url, options);
+      lastResponse = response;
       
       if (response.ok) return response;
       
-      // If not 429 (Rate Limit) or 5xx (Server Error), don't retry
-      if (response.status !== 429 && response.status < 500) {
+      const errText = await response.text();
+      const isRateLimit = response.status === 429 || errText.toLowerCase().includes("rate");
+      const isServerError = response.status >= 500;
+
+      if (!isRateLimit && !isServerError) {
+        // Not a retryable error
         return response;
       }
       
-      console.warn(`Gemini API attempt ${i + 1} failed with status ${response.status}. Retrying...`);
+      console.warn(`Attempt ${i + 1} failed (${response.status}). Reason: ${isRateLimit ? "Rate Limit" : "Server Error"}. Retrying...`);
     } catch (err) {
-      lastError = err;
-      console.warn(`Gemini API attempt ${i + 1} threw an error. Retrying...`, err);
+      console.warn(`Attempt ${i + 1} network error. Retrying...`, err);
     }
     
     if (i < maxRetries) {
@@ -155,7 +161,7 @@ async function fetchWithRetry(
     }
   }
   
-  throw lastError || new Error("Max retries reached");
+  return lastResponse!;
 }
 
 export async function rewriteResumeWithGemini(resumeText: string, jobDescription: string): Promise<RewrittenResume> {
@@ -166,12 +172,11 @@ export async function rewriteResumeWithGemini(resumeText: string, jobDescription
 
   const userMsg = `JOB DESCRIPTION:\n"""\n${jobDescription}\n"""\n\nORIGINAL RESUME:\n"""\n${resumeText}\n"""\n\nRewrite the resume to optimize for the JD. Focus on professional alignment and meaningful keyword integration rather than verbatim copying. Use the emit_resume tool.`;
 
-  let lastError: any;
+  let lastError: string = "Unknown error";
 
-  // Try each model in the fallback chain
   for (const model of MODELS) {
     try {
-      console.log(`Attempting rewrite with model: ${model}`);
+      console.log(`>>> Trying model: ${model}`);
       const response = await fetchWithRetry(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
         {
@@ -180,11 +185,7 @@ export async function rewriteResumeWithGemini(resumeText: string, jobDescription
           body: JSON.stringify({
             systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
             contents: [{ role: "user", parts: [{ text: userMsg }] }],
-            tools: [
-              {
-                functionDeclarations: [tool],
-              },
-            ],
+            tools: [{ functionDeclarations: [tool] }],
             toolConfig: {
               functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["emit_resume"] },
             },
@@ -192,28 +193,29 @@ export async function rewriteResumeWithGemini(resumeText: string, jobDescription
         }
       );
 
+      const resText = await response.text();
       if (!response.ok) {
-        const errText = await response.text();
-        // If it's a rate limit error, we continue to the next model in the loop
-        if (response.status === 429) {
-          console.warn(`Model ${model} is rate limited. Trying fallback...`);
+        lastError = `Model ${model} failed (${response.status}): ${resText.slice(0, 100)}`;
+        if (response.status === 429 || resText.toLowerCase().includes("rate")) {
+          console.warn(`Model ${model} is saturated. Trying next fallback...`);
           continue;
         }
-        throw new Error(`Gemini error (${model}): ${errText.slice(0, 300)}`);
+        throw new Error(lastError);
       }
 
-      const data = await response.json();
+      const data = JSON.parse(resText);
       const parts = data?.candidates?.[0]?.content?.parts ?? [];
       const fnCall = parts.find((p: any) => p.functionCall)?.functionCall;
 
       if (!fnCall?.args) {
-        console.warn(`Model ${model} did not return structured data. Trying fallback...`);
+        lastError = `Model ${model} returned empty structured data.`;
+        console.warn(lastError);
         continue;
       }
 
       const resume = fnCall.args as RewrittenResume;
 
-      // ===== POST-PROCESSING FILTER (HARD ENFORCEMENT) =====
+      // Post-processing
       if (resume.skills && Array.isArray(resume.skills)) {
         resume.skills = resume.skills
           .map(s => s.trim())
@@ -225,12 +227,12 @@ export async function rewriteResumeWithGemini(resumeText: string, jobDescription
 
       return resume;
     } catch (err: any) {
-      lastError = err;
-      console.error(`Error with model ${model}:`, err);
-      // Continue to next model if it's a transient error or rate limit
+      console.error(`Error with ${model}:`, err);
+      lastError = err.message;
     }
   }
 
-  throw lastError || new Error("All AI models failed to process the request. Please try again later.");
+  throw new Error(`All models exhausted. Last error: ${lastError}`);
 }
+
 

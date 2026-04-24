@@ -118,6 +118,46 @@ const tool = {
   },
 };
 
+const MODELS = [
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-8b",
+];
+
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries = 2,
+  initialDelay = 1000
+): Promise<Response> {
+  let lastError: any;
+  
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const response = await fetch(url, options);
+      
+      if (response.ok) return response;
+      
+      // If not 429 (Rate Limit) or 5xx (Server Error), don't retry
+      if (response.status !== 429 && response.status < 500) {
+        return response;
+      }
+      
+      console.warn(`Gemini API attempt ${i + 1} failed with status ${response.status}. Retrying...`);
+    } catch (err) {
+      lastError = err;
+      console.warn(`Gemini API attempt ${i + 1} threw an error. Retrying...`, err);
+    }
+    
+    if (i < maxRetries) {
+      const delay = initialDelay * Math.pow(2, i);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError || new Error("Max retries reached");
+}
+
 export async function rewriteResumeWithGemini(resumeText: string, jobDescription: string): Promise<RewrittenResume> {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
   if (!apiKey) {
@@ -126,55 +166,71 @@ export async function rewriteResumeWithGemini(resumeText: string, jobDescription
 
   const userMsg = `JOB DESCRIPTION:\n"""\n${jobDescription}\n"""\n\nORIGINAL RESUME:\n"""\n${resumeText}\n"""\n\nRewrite the resume to optimize for the JD. Focus on professional alignment and meaningful keyword integration rather than verbatim copying. Use the emit_resume tool.`;
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ role: "user", parts: [{ text: userMsg }] }],
-        tools: [
-          {
-            functionDeclarations: [tool],
-          },
-        ],
-        toolConfig: {
-          functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["emit_resume"] },
-        },
-      }),
+  let lastError: any;
+
+  // Try each model in the fallback chain
+  for (const model of MODELS) {
+    try {
+      console.log(`Attempting rewrite with model: ${model}`);
+      const response = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+            contents: [{ role: "user", parts: [{ text: userMsg }] }],
+            tools: [
+              {
+                functionDeclarations: [tool],
+              },
+            ],
+            toolConfig: {
+              functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["emit_resume"] },
+            },
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errText = await response.text();
+        // If it's a rate limit error, we continue to the next model in the loop
+        if (response.status === 429) {
+          console.warn(`Model ${model} is rate limited. Trying fallback...`);
+          continue;
+        }
+        throw new Error(`Gemini error (${model}): ${errText.slice(0, 300)}`);
+      }
+
+      const data = await response.json();
+      const parts = data?.candidates?.[0]?.content?.parts ?? [];
+      const fnCall = parts.find((p: any) => p.functionCall)?.functionCall;
+
+      if (!fnCall?.args) {
+        console.warn(`Model ${model} did not return structured data. Trying fallback...`);
+        continue;
+      }
+
+      const resume = fnCall.args as RewrittenResume;
+
+      // ===== POST-PROCESSING FILTER (HARD ENFORCEMENT) =====
+      if (resume.skills && Array.isArray(resume.skills)) {
+        resume.skills = resume.skills
+          .map(s => s.trim())
+          .filter(s => s.split(/\s+/).length <= 4)
+          .filter(s => !/^\d+\./.test(s))
+          .filter(s => !/^(collaborate|ensure|understand|perform|deliver|using|working|strong|excellent|responsible)/i.test(s))
+          .slice(0, 20);
+      }
+
+      return resume;
+    } catch (err: any) {
+      lastError = err;
+      console.error(`Error with model ${model}:`, err);
+      // Continue to next model if it's a transient error or rate limit
     }
-  );
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Gemini error: ${errText.slice(0, 300)}`);
   }
 
-  const data = await response.json();
-  const parts = data?.candidates?.[0]?.content?.parts ?? [];
-  const fnCall = parts.find((p: any) => p.functionCall)?.functionCall;
-
-  if (!fnCall?.args) {
-    throw new Error("AI did not return a structured resume. Please try again.");
-  }
-
-  const resume = fnCall.args as RewrittenResume;
-
-  // ===== POST-PROCESSING FILTER (HARD ENFORCEMENT) =====
-  // If the AI still tries to dump sentences into the skills, we clean it up here.
-  if (resume.skills && Array.isArray(resume.skills)) {
-    resume.skills = resume.skills
-      .map(s => s.trim())
-      // Remove anything that looks like a sentence (more than 4 words)
-      .filter(s => s.split(/\s+/).length <= 4)
-      // Remove anything that contains numbers followed by a dot (e.g. "1. collaborate")
-      .filter(s => !/^\d+\./.test(s))
-      // Remove common soft skill/verb starters
-      .filter(s => !/^(collaborate|ensure|understand|perform|deliver|using|working|strong|excellent|responsible)/i.test(s))
-      // Take only the top 20
-      .slice(0, 20);
-  }
-
-  return resume;
+  throw lastError || new Error("All AI models failed to process the request. Please try again later.");
 }
+
